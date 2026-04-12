@@ -29,6 +29,7 @@ import {
 } from "../../../../lib/native-logging";
 import { withSpan, setSpanAttributes } from "../../../../lib/otel-tracer";
 import { scrapePDFWithRunPodMU } from "./runpodMU";
+import { scrapePDFWithFirePDF } from "./firePDF";
 import { scrapePDFWithParsePDF } from "./pdfParse";
 import { captureExceptionWithZdrCheck } from "../../../../services/sentry";
 import { isPdfBuffer, PDF_SNIFF_WINDOW } from "./pdfUtils";
@@ -63,6 +64,7 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
         html: content,
         markdown: content,
 
+        contentType: "application/pdf",
         proxyUsed: meta.pdfPrefetch.proxyUsed,
       };
     } else {
@@ -97,6 +99,7 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
         html: content,
         markdown: content,
 
+        contentType: "application/pdf",
         proxyUsed: "basic",
       };
     }
@@ -151,11 +154,14 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
     let shadowConfidence: number | undefined;
     let shadowIsComplex: boolean | undefined;
     let shadowIneligibleReason: string | null | undefined;
+    let shadowPagesNeedingOcr: number[] | undefined;
 
+    const forceFirePDF =
+      !!meta.options.__forceFirePDF && !!config.FIRE_PDF_BASE_URL;
     const rustEnabled = !!config.PDF_RUST_EXTRACT_ENABLE;
     const logger = meta.logger.child({ method: "scrapePDF/processPdf" });
 
-    if (!rustEnabled || mode === "ocr") {
+    if (!rustEnabled || mode === "ocr" || forceFirePDF) {
       // Legacy / OCR path: detect metadata only, skip Rust extraction.
       // When PDF_RUST_EXTRACT_ENABLE is off this is the only path taken,
       // matching current prod behaviour (detectPdf → MinerU → pdfParse).
@@ -280,6 +286,7 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
           shadowConfidence = pdfResult.confidence;
           shadowIsComplex = pdfResult.isComplex;
           shadowIneligibleReason = ineligibleReason;
+          shadowPagesNeedingOcr = pdfResult.pagesNeedingOcr;
         }
 
         // In fast mode, if the PDF requires OCR, fail immediately with a
@@ -337,7 +344,51 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
     if (!result && !skipOCR) {
       const base64Content = (await readFile(tempFilePath)).toString("base64");
 
+      // Route a percentage of traffic to Fire PDF instead of MinerU
+      const useFirePDF =
+        forceFirePDF ||
+        (config.FIRE_PDF_ENABLE &&
+          config.FIRE_PDF_BASE_URL &&
+          base64Content.length < MAX_FILE_SIZE &&
+          Math.random() * 100 < config.FIRE_PDF_PERCENT);
+
+      if (useFirePDF) {
+        try {
+          result = await scrapePDFWithFirePDF(
+            {
+              ...meta,
+              logger: meta.logger.child({
+                method: "scrapePDF/firePDF",
+              }),
+            },
+            base64Content,
+            maxPages,
+            effectivePageCount,
+          );
+        } catch (error) {
+          if (
+            error instanceof RemoveFeatureError ||
+            error instanceof AbortManagerThrownError
+          ) {
+            throw error;
+          }
+          if (forceFirePDF) {
+            meta.logger.error("FirePDF failed (forced, no fallback)", {
+              method: "scrapePDF/firePDF",
+              error,
+            });
+            throw error;
+          }
+          meta.logger.warn("FirePDF failed -- falling back to MinerU", {
+            method: "scrapePDF/firePDF",
+            error,
+          });
+        }
+      }
+
       if (
+        !result &&
+        !forceFirePDF &&
         base64Content.length < MAX_FILE_SIZE &&
         config.RUNPOD_MU_API_KEY &&
         config.RUNPOD_MU_POD_ID
@@ -389,6 +440,14 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
                   confidence: shadowConfidence,
                   isComplex: shadowIsComplex,
                   ineligibleReason: shadowIneligibleReason,
+                  ocrPageCount: shadowPagesNeedingOcr?.length ?? 0,
+                  ocrPageRatio:
+                    effectivePageCount > 0
+                      ? Math.round(
+                          ((shadowPagesNeedingOcr?.length ?? 0) * 100) /
+                            effectivePageCount,
+                        ) / 100
+                      : 0,
                   ...metrics.overall,
                 });
               } catch (error) {
@@ -429,8 +488,8 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
       }
     }
 
-    // Final fallback to PdfParse.
-    if (!result) {
+    // Final fallback to PdfParse (skipped when Fire PDF is forced).
+    if (!result && !forceFirePDF) {
       result = await scrapePDFWithParsePDF(
         {
           ...meta,
@@ -452,6 +511,7 @@ export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
         title: metadataTitle,
       },
 
+      contentType: "application/pdf",
       proxyUsed: "basic",
     };
   } finally {
