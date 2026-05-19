@@ -39,7 +39,7 @@
 
 # **🔥 Firecrawl**
 
-**Power AI agents with clean web data.** The API to search, scrape, and interact with the web at scale. Open source and available as a [hosted service](https://firecrawl.dev/?ref=github).
+**Search, scrape, and clean the web for AI agents.** The web context API to find sources, extract content, and turn it into clean Markdown or structured data your agents can ship with. Open source and available as a [hosted service](https://firecrawl.dev/?ref=github).
 
 _Pst. Hey, you, join our stargazers :)_
 
@@ -397,6 +397,7 @@ result = app.agent(
 )
 ```
 
+
 **When to use Pro:**
 - Comparing data across multiple websites
 - Extracting from sites with complex navigation or auth
@@ -654,10 +655,44 @@ end
 {:ok, response} = Firecrawl.map_urls(url: "https://example.com")
 ```
 
+### Rust
+
+Add the dependency:
+```toml
+[dependencies]
+firecrawl = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+```rust
+use firecrawl::{Client, ScrapeOptions, Format, CrawlOptions};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new("fc-YOUR_API_KEY")?;
+
+    // Scrape a URL
+    let document = client.scrape("https://firecrawl.dev", None).await?;
+    println!("{:?}", document.markdown);
+
+    // Crawl a website
+    let options = CrawlOptions {
+        limit: Some(50),
+        ..Default::default()
+    };
+    let result = client.crawl("https://docs.firecrawl.dev", options).await?;
+    println!("Crawled {} pages", result.data.len());
+
+    // Search the web
+    let response = client.search("best web scraping tools 2024", None).await?;
+    println!("{:?}", response.data);
+
+    Ok(())
+}
+```
+
 ### Community SDKs
 
-- [Go SDK](https://github.com/mendableai/firecrawl-go)
-- [Rust SDK](https://docs.firecrawl.dev/sdks/rust)
+- [Go SDK](https://github.com/firecrawl/firecrawl/tree/main/apps/go-sdk)
 
 ---
 
@@ -665,6 +700,8 @@ end
 
 **Agents & AI Tools**
 - [Firecrawl Skill](https://docs.firecrawl.dev/sdks/cli)
+- [Firecrawl CLI Skills](https://github.com/firecrawl/cli#agent-skills)
+- [Firecrawl Workflows](https://github.com/firecrawl/firecrawl-workflows)
 - [Firecrawl MCP](https://github.com/mendableai/firecrawl-mcp-server)
 
 **Platforms**
